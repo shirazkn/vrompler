@@ -1,4 +1,6 @@
 """
+Usage : python preprocessor.py --video <file_path>>
+
 Use this to convert a video file from the 20 to 80 second marks in a different format
 ffmpeg -i input.avi -c:v h264 -ss 20 -t 80 output.mp4
 """
@@ -11,6 +13,8 @@ import cv2
 import ffmpeg
 import time
 
+PROCESSING_FRAME_SIZE = 500
+
 # Parse terminal arguments
 ap = argparse.ArgumentParser()
 ap.add_argument("-v", "--video", help="path to the video file")
@@ -18,20 +22,19 @@ ap.add_argument("-a", "--min-area", type=int, default=500, help="minimum area si
 # Note: Contours smaller than min-area are ignored
 args = vars(ap.parse_args())
 
-# If the video argument is None, read from webcam
 if args.get("video", None) is None:
+    # Use web-cam video
 	vs = VideoStream(src=0).start()
 	time.sleep(2.0)
-# else, read from file
+	vs_data = {"frameduration_ms": 1}  # Ensures that the waitKey function doesn't wait longer than 1ms
 else:
+    # Read from video file
 	vs = cv2.VideoCapture(args["video"])
 	vs_data = ffmpeg.probe(args["video"])
 	assert vs_data["format"]["probe_score"] > 90  # Else ffmpeg doesn't know this file (bad)!
 	for stream in vs_data["streams"]:
 	    if stream["codec_type"] == "video":
-	        vs_data["frameduration_ms"] = (1.0/stream["r_frame_rate"])*1000.0
-
-vs_data += 1
+	        vs_data["frameduration_ms"] = (1.0/eval(stream["r_frame_rate"]))*1000.0
 
 firstFrame = None
 
@@ -40,13 +43,13 @@ while True:
 	# Get current frame
 	frame = vs.read()
 	frame = frame if args.get("video", None) is None else frame[1]
-	text = "Unoccupied"
+	text = "False"
 	# if the frame could not be grabbed, then we have reached the end
 	# of the video
 	if frame is None:
 		break
 	# Resize the frame (no need to process raw image!)
-	frame = imutils.resize(frame, width=500)
+	frame = imutils.resize(frame, width=PROCESSING_FRAME_SIZE)
 	# Convert it to grayscale
 	gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 	# Gaussian Blur (across a 21x21 range)
@@ -75,21 +78,21 @@ while True:
 		(x, y, w, h) = cv2.boundingRect(c)
 		cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-		text = "Occupied"
+		text = "True"
 
 	# Draw the text and timestamp on the frame
-	cv2.putText(frame, "Room Status: {}".format(text), (10, 20),
+	cv2.putText(frame, "Objects in frame: {}".format(text), (10, 20),
 				cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 	cv2.putText(frame, datetime.datetime.now().strftime("%A %d %B %Y %I:%M:%S%p"),
 				(10, frame.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 255), 1)
 	# show the frame and record if the user presses a key
-	cv2.imshow("Security Feed", frame)
-	cv2.imshow("Thresh", thresh)
+	cv2.imshow("Raw Footage", frame)
+	cv2.imshow("Threshold Footage", thresh)
 	cv2.imshow("Frame Delta", frameDelta)
 
 	elapsed_time = (time.time() - timer)*1000.0
-	wait_time = min(vs_data["frameduration_ms"] - elapsed_time, 1)
-	key = cv2.waitKey(wait_time) & 0xFF
+	wait_time = max(vs_data["frameduration_ms"] - elapsed_time, 1)
+	key = cv2.waitKey(int(wait_time)) & 0xFF
 	# if the `q` key is pressed, break from the lop
 	if key == ord("q"):
 		break
