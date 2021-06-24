@@ -3,3 +3,6 @@ future==0.18.2
 imutils==0.5.4
 numpy==1.20.3
 opencv-contrib-python==4.5.2.54
+
+# pip3 install torch==1.6.0 torchvision==0.7.0 -f https://download.pytorch.org/whl/cu101/torch_stable.html
+# Unsure if we need these : tensorboard scipy matplotlib ??
