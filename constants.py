@@ -1,7 +1,10 @@
 import os
 
+NUMPY_EXT = ".npy.gz"
+VIDEO_EXT = ".mp4"
+
 RAFT_MODELS = [
-    {"rel_path": "RAFT/models/raft-things.pth", "width": 1024, "aspect_ratio": 440.0/1024}
+    {"rel_path": "RAFT/models/raft-things.pth", "width": 1024, "aspect_ratio": 1024.0/440}
 ]
 RAFT_MODEL_IND = 0
 RAFT_MODEL_FILE = os.path.join(os.path.dirname(__file__), RAFT_MODELS[RAFT_MODEL_IND]["rel_path"])

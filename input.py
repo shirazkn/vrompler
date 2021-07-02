@@ -1,6 +1,8 @@
 import cv2
 import ffmpeg
 import time
+import gzip
+import numpy as np
 from constants import PROCESSING_FRAME_WIDTH
 from imutils import resize
 from imutils.video import VideoStream
@@ -24,6 +26,9 @@ class VideoFile:
     def close(self):
         self.file.release()
 
+    def __del__(self):
+        self.close()
+
 
 class WebCam:
     def __init__(self):
@@ -37,3 +42,15 @@ class WebCam:
 
     def close(self):
         self.stream.stop()
+
+    def __del__(self):
+        self.close()
+
+
+class NumpyRead:
+    def __init__(self, filename):
+        file = gzip.GzipFile(filename, "r")
+        self.data = np.load(file)
+
+    def get_frame(self):
+        return self.data.pop(0)

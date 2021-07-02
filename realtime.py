@@ -7,14 +7,6 @@ Note:
 Use this to convert a video file from the 20 to 80 second marks in a different format
 ffmpeg -i input.avi -c:v h264 -ss 20 -t 80 output.mp4
 Video output resolution is handled by constants.PROCESSING_FRAME_SIZE
-
-TODO : Make processing frame resolution separate from display resolution
-TODO : Add a display/output class that can redo aspect ratio using black bars/some other method
-TODO : Write a file that pre-processes optical flow on a video file and generates a dataset.
-^Saves FPS, original file path, original file name, FPS of data
-^Advantage : Data can be at a different FPS after smoothing,
-or can be interpolated at higher FPS to slow down original video
-Do this after you figure out how to upscale/downscale so that flow data can be compared one-to-one againt pixels
 """
 import time
 import argparse
@@ -44,15 +36,15 @@ while True:
 		break
 
 	# OBJECT DETECTION USING OPENCV
-	frame_overlay, thresh_frame, delta_frame = objDetection.update(frame)
+	objDetection.update(frame)
+	frame_overlay = objDetection.get_display()
 
 	# OPTIC FLOW USING RAFT
-	flow_frame = opticFlow.update(frame)
+	opticFlow.update(frame)
+	flow_frame = opticFlow.get_display()
 
 	# Show the frame
 	cv2.imshow("Raw Footage", frame_overlay)
-	cv2.imshow("Threshold Footage", thresh_frame)
-	cv2.imshow("Frame Delta", delta_frame)
 	cv2.imshow("Optic Flow", flow_frame)
 
 	# If display rate is faster than frame rate, wait a bit to match playback speed of source
