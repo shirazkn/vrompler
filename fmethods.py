@@ -2,6 +2,7 @@ import os
 import datetime
 import numpy as np
 from argparse import Namespace
+from copy import deepcopy
 
 # For OpticFlow (RAFT)
 import torch
@@ -20,8 +21,11 @@ from imutils import resize
 import constants
 from hidden_constants import *
 
+EPSILON = 1e-2  # Assumes we're not upsampling by 100x!!
+
 
 def crop(_frame, new_dim, along=HEIGHT, align=ALIGN_CENTER):
+    # Crops along dimension specified by `along`
     start_loc = 0
     old_dim = np.shape(_frame)[along]
     if align == ALIGN_CENTER:
@@ -34,8 +38,18 @@ def crop(_frame, new_dim, along=HEIGHT, align=ALIGN_CENTER):
     return _frame[tuple(slice_list)]
 
 
-def c_resize(_frame, dims: tuple, align=ALIGN_CENTER):
-    # Constrained Resize - Requires both dims to be specified
+def crop_from_aspect_ratio(_frame, new_asp_ratio, align=ALIGN_CENTER):
+    # Preserves at least one dimension of frame, sets aspect ratio
+    old_dims = np.shape(_frame)[:2]
+    old_asp_ratio = old_dims[WIDTH] / old_dims[HEIGHT]
+    if new_asp_ratio < old_asp_ratio:
+        return crop(_frame, int(new_asp_ratio*old_dims[HEIGHT]), along=WIDTH, align=align)
+    else:
+        return crop(_frame, int(old_dims[WIDTH]/new_asp_ratio), along=HEIGHT, align=align)
+
+
+def c_resize(_frame, dims: tuple, align=ALIGN_CENTER, cropping=True):
+    # Constrained resize - Resize and crop to new dimensions
     old_dims = np.shape(_frame)[:2]
     new_asp_rat = dims[WIDTH] / dims[HEIGHT]
     old_asp_rat = old_dims[WIDTH] / old_dims[HEIGHT]
@@ -43,10 +57,10 @@ def c_resize(_frame, dims: tuple, align=ALIGN_CENTER):
     if new_asp_rat < old_asp_rat:
         _frame = resize(_frame, height=dims[HEIGHT])
         # There's no functionality to crop outside a frame (i.e. add black bars) since I don't need it here currently
-        return crop(_frame, dims[WIDTH], along=WIDTH, align=align)
+        return crop(_frame, dims[WIDTH], along=WIDTH, align=align) if cropping else _frame
     else:
         _frame = resize(_frame, width=dims[WIDTH])
-        return crop(_frame, dims[HEIGHT], along=HEIGHT, align=align)
+        return crop(_frame, dims[HEIGHT], along=HEIGHT, align=align) if cropping else _frame
 
 
 def quick_resize(_frame, dims):
@@ -80,10 +94,25 @@ class RaftModel(FMethod):
 
         self.frame = None
         self.last_frame = None
-        self.cropped_frame = None
-        self.display_frame = None
-        self.flow_up = None
-        self.flow_low = None
+        self.source_frame = None
+        self.last_source_frame = None  # Possibly not needed
+        self.flow = None
+        self.upsampled_flow = None
+        self.last_upsampled_flow = None
+        self.upsampled_avg_flow = None  # Flow averaged to get the exact flow at -1 timestep
+        self.last_upsampled_avg_flow = None  # Flow averaged to get the exact flow at -2 timestep
+        self.flow_limits = {
+            "flow_u_min": 100.0, "flow_v_min": 100.0,
+            "flow_u_max": -100.0, "flow_v_max": -100.0,
+            "flow_speed_min": 100.0,
+            "flow_speed_max": 0.0
+                         }
+        self.upsampled_flow_limits = {
+            "flow_u_min": 100.0, "flow_v_min": 100.0,
+            "flow_u_max": -100.0, "flow_v_max": -100.0,
+            "flow_speed_min": 100.0,
+            "flow_speed_max": 0.0
+        }
 
         self.aspect_ratio = constants.RAFT_MODELS[constants.RAFT_MODEL_IND]["aspect_ratio"]
         self.width = constants.RAFT_MODELS[constants.RAFT_MODEL_IND]["width"]
@@ -93,14 +122,14 @@ class RaftModel(FMethod):
         super().__init__(**kwargs)
 
     def prepare_frame(self, _frame):
-        self.cropped_frame = c_resize(_frame, (self.height, self.width))
-        _ret_frame = np.array(self.cropped_frame).astype(np.uint8)
+        cropped_frame = c_resize(_frame, (self.height, self.width))
+        _ret_frame = np.array(cropped_frame).astype(np.uint8)
         _ret_frame = torch.from_numpy(_ret_frame).permute(2, 0, 1).float()
         return _ret_frame[None].to(constants.DEVICE)
 
-    def unprepare_frame(self, _out_frame):
+    def raft_display_from_flow(self, _out_frame):
         _frame = flow_viz.flow_to_image(_out_frame[0].permute(1, 2, 0).cpu().numpy())
-        return c_resize(_frame, dims=self.display_dims)[:, :, [2, 1, 0]] / 255.0
+        return c_resize(_frame, dims=self.display_dims)[:, :, [2, 1, 0]]
 
     def set_display_dims(self, dims=None, example_frame=None):
         if dims is not None:
@@ -111,21 +140,107 @@ class RaftModel(FMethod):
             raise ValueError("Both arguments cannot be None.")
 
     def update(self, _frame):
+        self.last_source_frame = self.source_frame
+        self.last_frame = self.frame
+
+        self.source_frame = _frame
         self.frame = self.prepare_frame(_frame)
+
         if self.last_frame is None:
             self.set_display_dims(example_frame=_frame)
-            self.last_frame = self.frame
-            self.display_frame = _frame * 0.0
             return
 
         with torch.no_grad():
-            self.flow_low, self.flow_up = self.model(self.last_frame, self.frame, iters=self.iterations, test_mode=True)
+            _, t_flow = self.model(self.last_frame, self.frame, iters=self.iterations, test_mode=True)
 
-        self.last_frame = self.frame
-        self.display_frame = self.unprepare_frame(self.flow_up)
+        self.flow = t_flow[0].permute(1, 2, 0).cpu().numpy()
+        self.flow_limits = self.get_flow_limits(self.flow_limits, self.flow)
+
+        self.upsample_flow()
+        self.upsampled_flow_limits = self.get_flow_limits(self.upsampled_flow_limits, self.upsampled_flow)
 
     def get_display(self):
-        return self.display_frame
+        # Uses the visualization method in raft to generate colormap from flow data
+        return self.raft_display_from_flow(self.flow) if self.flow is not None else None
+
+    def get_images_from_flow(self, frame):
+        # Generates images from flow data so that flow data can be saved 'efficiently'
+        # TODO
+        return None, None
+
+    def interpolate_frames(self, frame_1, frame_2, flow_1, flow_2, n_iterpolations):
+        interpolated_source_frames = []
+        intervals = np.linspace(0, 1, n_iterpolations+2)[1:-1]
+        # 1 unit of dt is the time elapsed between source frames
+        for dt in intervals:
+            mid_1 = 1.0 - 0.5*dt  # Flow 1 is linearly interpolated with this weight
+            mid_2 = 1.0 - 0.5*(1+dt)  # dt + (1-dt)/2 = (1+dt)/2
+            frame_pushed_front = self.push_frame_to_flow(frame_1, flow_1*mid_1 + (1-mid_1)*flow_2, dt)
+            frame_pushed_back = self.push_frame_to_flow(frame_2, flow_1*mid_2 + (1-mid_2)*flow_2, -(1-dt))
+            interpolated_source_frames.append((1-dt)*frame_pushed_front + dt*frame_pushed_back)
+
+        return interpolated_source_frames
+
+    def push_frame_to_flow(self, frame, flow, dt):
+        dims = np.shape(frame)[0:2]
+        pushed_frame = deepcopy(frame)
+        for i in range(dims[0]):
+            for j in range(dims[1]):
+                pushed_frame[i][j][0] = self.get_value_at_xy(frame, i+0.5-flow[i][j][0]*dt, j+0.5-flow[i][j][1]*dt, 0)
+                pushed_frame[i][j][1] = self.get_value_at_xy(frame, i+0.5-flow[i][j][0]*dt, j+0.5-flow[i][j][1]*dt, 1)
+                pushed_frame[i][j][2] = self.get_value_at_xy(frame, i+0.5-flow[i][j][0]*dt, j+0.5-flow[i][j][1]*dt, 2)
+        return pushed_frame
+
+    def upsample_flow(self):
+        self.last_upsampled_avg_flow = self.upsampled_avg_flow
+        self.last_upsampled_flow = self.upsampled_flow
+
+        scale_factor = self.display_dims[HEIGHT]/self.height  # >=1
+        flow_up = np.zeros([self.display_dims[HEIGHT], self.display_dims[WIDTH], 2])
+        for i in range(self.display_dims[HEIGHT]):
+            for j in range(self.display_dims[WIDTH]):
+                # Get corresponding coordinates in low res. flow
+                x, y = [(i+0.5)/scale_factor, (j+0.5)/scale_factor]
+                flow_up[i][j][0] = self.get_value_at_xy(self.flow, x, y, 0) * scale_factor
+                flow_up[i][j][1] = self.get_value_at_xy(self.flow, x, y, 1) * scale_factor
+
+        self.upsampled_flow = flow_up
+        if self.last_upsampled_flow is None:
+            self.last_upsampled_flow = deepcopy(self.upsampled_flow)
+
+        self.upsampled_avg_flow = (self.last_upsampled_flow + self.upsampled_flow) * 0.5
+
+    @staticmethod
+    def get_flow_limits(flow_limits, flow):
+        flow_limits["flow_u_min"] = min(flow_limits["flow_u_min"], np.array(flow[:, :, 0]).min())
+        flow_limits["flow_v_min"] = min(flow_limits["flow_v_min"], np.array(flow[:, :, 1]).min())
+        flow_limits["flow_u_max"] = max(flow_limits["flow_u_max"], np.array(flow[:, :, 0]).max())
+        flow_limits["flow_v_max"] = max(flow_limits["flow_v_max"], np.array(flow[:, :, 1]).max())
+
+        flow_speed = np.sqrt(np.square(flow[:, :, 0]) + np.square(flow[:, :, 1]))
+        flow_limits["flow_speed_min"] = min(flow_limits["flow_speed_min"], flow_speed.min())
+        flow_limits["flow_speed_max"] = max(flow_limits["flow_speed_max"], flow_speed.max())
+        return flow_limits
+
+    @staticmethod
+    def get_value_at_xy(data, x, y, value_ind):
+        # TODO Account for height and width interchange!!
+        # Upsamples value of data[:, :, value_ind] at float coordinates x, y (1 unit = 1 pixel of data)
+        x_lim, y_lim = np.shape(data)[0:2]
+        floor_x = min( max(int(np.floor(x - 0.5)), 0) , x_lim-1)
+        floor_y = min( max(int(np.floor(y - 0.5)), 0) , y_lim-1)
+        ceil_x = max( min(int(np.ceil(x - 0.5)) , x_lim-1), 0)
+        ceil_y = max( min(int(np.ceil(y - 0.5)) , y_lim-1), 0)
+        th_x = 1 - min(np.modf(x-0.5)[0], EPSILON)
+        th_y = 1 - min(np.modf(y-0.5)[0], EPSILON)
+
+        # Lower left, upper left ...clockwise
+        vals = [data[floor_x][floor_y], data[floor_x][ceil_y], data[ceil_x][ceil_y], data[ceil_x][floor_y]]
+        vals = [val[value_ind] for val in vals]
+        vals1 = [vals[0]*th_y + vals[1]*(1-th_y), vals[1]*th_x + vals[2]*(1-th_x),
+                 vals[2]*(1-th_y) + vals[3]*th_y, vals[3]*(1-th_x) + vals[0]*th_x]
+        vals2 = [vals1[0]*th_x + vals1[2]*(1-th_x), vals1[1]*(1-th_y) + vals1[3]*th_y]
+        return 0.5*(vals2[0] + vals2[1])
 
 
 class ObjectDetection:
@@ -235,7 +350,7 @@ class DeepDream(object):
         self._graph = tf.Graph()
         self._session = tfc.InteractiveSession(graph=self._graph)
         self._resize = self._tffunc(np.float32, np.int32)(self._base_resize)
-        with tf.gfile.GFile(DeepDream._MODEL_FILENAME, 'rb') as f:  # or tfc.gfile.FastGFile
+        with tfc.gfile.FastGFile(DeepDream._MODEL_FILENAME, 'rb') as f:
             graph_def = tfc.GraphDef()
             graph_def.ParseFromString(f.read())
         self._t_input = tfc.placeholder(np.float32, name='input')  # define the input tensor

@@ -14,9 +14,14 @@ class VideoFile:
         vs_data = ffmpeg.probe(filename)
         assert vs_data["format"]["probe_score"] > 90  # Else ffmpeg doesn't know this file (bad)!
         self.framelength_ms = None  # Used to match playback speed of file
+        self.framerate = None
+        self.height = self.width = None
         for stream in vs_data["streams"]:
             if stream["codec_type"] == "video":
                 self.framelength_ms = (1.0 / eval(stream["r_frame_rate"])) * 1000.0
+                self.framerate = eval(stream["r_frame_rate"])
+                self.height = stream["height"]
+                self.width = stream["width"]
                 break
 
     def get_frame(self):
@@ -50,7 +55,7 @@ class WebCam:
 class NumpyRead:
     def __init__(self, filename):
         file = gzip.GzipFile(filename, "r")
-        self.data = np.load(file)
+        self.data = np.load(file, allow_pickle=True)
 
-    def get_frame(self):
+    def get_object(self):
         return self.data.pop(0)

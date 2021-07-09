@@ -12,3 +12,6 @@ RAFT_MODEL_FILE = os.path.join(os.path.dirname(__file__), RAFT_MODELS[RAFT_MODEL
 DEVICE = 'cpu'  # Can be run with 'cuda' on supporting systems (not tested)
 PROCESSING_FRAME_WIDTH = RAFT_MODELS[RAFT_MODEL_IND]["width"]  # Height is scaled to match asp. ratio
 ASPECT_RATIO = RAFT_MODELS[RAFT_MODEL_IND]["aspect_ratio"]
+
+SAVE_DIRECTORY = "processed_videos"
+SAVE_FRAMERATE = 60

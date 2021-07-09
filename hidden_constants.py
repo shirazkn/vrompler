@@ -1,3 +1,5 @@
+# Magic numbers!
+
 HEIGHT = 0
 WIDTH = 1
 

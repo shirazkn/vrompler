@@ -1,8 +1,11 @@
 """
-This does off-line processing to save optic flow data (Takes a lot of time on CPU!)
+This does off-line processing
+Uses optic flow data (generated using the RAFT neural net) to slow down the video by a specified factor
+Takes a lot of time on CPU!
 Usage : python preprocessor.py --video <file_path>>
 """
 from constants import *
+from hidden_constants import *
 from tqdm import tqdm
 
 import argparse
@@ -12,9 +15,17 @@ import fmethods
 import numpy as np
 from output import *
 
+
+SLOW_DOWN_FACTOR = 10  # Number of frames inserted between adjacent frames
+GENERATE_MASKS = True  # Exports a video that can serve as a mask for source footage
+OPTIC_FLOW_ITERATIONS = 10
+opticFlow = fmethods.RaftModel(iterations=OPTIC_FLOW_ITERATIONS)
+# (e.g. to extract interesting objects from a scene)
+
+
 # Parse terminal arguments
 ap = argparse.ArgumentParser()
-ap.add_argument("-v", "--video", help="path to the video file")
+ap.add_argument("-v", "--video", help="Path to the video file")
 args = vars(ap.parse_args())
 
 # PREPARE VIDEO SOURCE
@@ -22,53 +33,84 @@ if args.get("video", None) is None:
     raise ValueError("Must provide video file using '--video' option!")
 else:
     vs = input.VideoFile(args["video"])
+    source_file, extension = os.path.splitext(args["video"])
+    filename = os.path.split(source_file)[-1]
+    filepath = os.path.join(SAVE_DIRECTORY, filename)  # TODO check if you can see height and width here
+
+file_info = {
+    "filename": filename, "filepath": filepath, "extension": extension,
+    "source_framerate": vs.framerate, "output_framerate": SAVE_FRAMERATE,
+    "slowdown_factor": SLOW_DOWN_FACTOR
+             }
+
+# Ensure that source footage is at least as big as optic flow frame
+# else the logic for cropping_frame might fail below
+if vs.height < opticFlow.height or vs.width < opticFlow.width:
+    def get_frame():
+        return fmethods.c_resize(vs.get_frame(), dims=(opticFlow.height, opticFlow.width), cropping=False)
+else:
+    def get_frame():
+        return vs.get_frame()
 
 # TODO For testing purposes, skip the fade-in and title card
 for _ in range(1200):
     _ = vs.get_frame()
 
-opticFlow = fmethods.RaftModel(iterations=1)
-deepDream = fmethods.DeepDream()
-outfile_OF1 = ProcessWrite("test_cropped_video_output" + VIDEO_EXT, opticFlow.height, opticFlow.width)
-outfile_OF2 = ProcessWrite("test_of_video_output" + VIDEO_EXT, opticFlow.height, opticFlow.width)
-outfile_DD = ProcessWrite("test_dd_video_output" + VIDEO_EXT, opticFlow.height, opticFlow.width)
-outfile_OFnumpy = NumpyWrite("test_numpy_output" + NUMPY_EXT)  # this is a function not class
-flow_frames = []
+frame = get_frame()
+cropped_frame = fmethods.crop_from_aspect_ratio(frame, new_asp_ratio=opticFlow.aspect_ratio)
+opticFlow.set_display_dims(example_frame=cropped_frame)
+opticFlow.update(cropped_frame)
+dims = np.shape(cropped_frame)
+outfiles = [
+    ProcessWrite(filepath + "_cropped" + VIDEO_EXT, dims[HEIGHT], dims[WIDTH], framerate=vs.framerate),
+    ProcessWrite(filepath + "_flow_u" + VIDEO_EXT, opticFlow.height, opticFlow.width, framerate=vs.framerate),
+    ProcessWrite(filepath + "_flow_v" + VIDEO_EXT, opticFlow.height, opticFlow.width, framerate=vs.framerate),
+    ProcessWrite(filepath + "_slowed" + str(int(SLOW_DOWN_FACTOR)) + "x" + VIDEO_EXT,
+                 opticFlow.height, opticFlow.width, framerate=vs.framerate + 10),
+    # The +10 is a slight speed-up for smoothing/giving ffmpeg more frames to work with
+    NumpyWrite(filepath + "_info" + NUMPY_EXT)
+            ]
 
-# TODO for testing purposes, save <1s
-for _ in tqdm(range(5)):
-    frame = vs.get_frame()
-    if frame is None:
-        break  # End of video
+last_cropped_frame = cropped_frame
+last_flow = None
+flow = None
 
+outfiles[0].write(cropped_frame)
+
+# TODO for testing purposes, save <1s | After testing: while frame
+for i in tqdm(range(2)):
     opticFlow.update(frame)
-    deepDream.update(frame)
 
-    outfile_OF1.write(opticFlow.cropped_frame)
-    outfile_OF2.write(opticFlow.get_display())
-    outfile_DD.write(deepDream.get_display(dims=(opticFlow.height, opticFlow.width)))
-    outfile_OFnumpy.write([opticFlow.flow_low, opticFlow.flow_up])
+    outfiles[3].write(last_cropped_frame)
+    if i > 0:
+        interp_frames = opticFlow.interpolate_frames(last_cropped_frame, cropped_frame,
+                                                     opticFlow.last_upsampled_avg_flow, opticFlow.upsampled_avg_flow,
+                                                     n_iterpolations=SLOW_DOWN_FACTOR-1)
 
-    """
-    TODO: OF2.write() does not work but works in realtime.py. Also output looks blue??
-    The following is from cv2.imshow() docs...
-     
-    .   The function imshow displays an image in the specified window. If the window was created with the
-    .   cv::WINDOW_AUTOSIZE flag, the image is shown with its original size, however it is still limited by the screen resolution.
-    .   Otherwise, the image is scaled to fit the window. The function may scale the image, depending on its depth:
-    .   
-    .   -   If the image is 8-bit unsigned, it is displayed as is.
-    .   -   If the image is 16-bit unsigned or 32-bit integer, the pixels are divided by 256. That is, the
-    .       value range [0,255\*256] is mapped to [0,255].
-    .   -   If the image is 32-bit or 64-bit floating-point, the pixel values are multiplied by 255. That is, the
-    .       value range [0,1] is mapped to [0,255].
-    
-    TODO - Something similar when writing to file!
-    """
+        for _if in interp_frames:
+            outfiles[3].write(_if)
 
+    last_cropped_frame = cropped_frame
+    cropped_frame = fmethods.crop_from_aspect_ratio(frame, new_asp_ratio=opticFlow.aspect_ratio)
+
+    # Testing
+    flow_uv = opticFlow.flow
+    u = flow_uv[:, :, 0]
+    v = flow_uv[:, :, 1]
+    rad = np.sqrt(np.square(u) + np.square(v))
+    print("Max/min flow is", np.array(rad).max(), " and ", np.array(rad).min())
+    flow_u, flow_v = opticFlow.get_images_from_flow(frame)
+    outfiles[0].write(cropped_frame)
+
+    frame = get_frame()
+
+outfiles[3].write(last_cropped_frame)
+outfiles[-1].write(file_info)
 
 # Cleanup the camera and close any open windows
 vs.close()
 cv2.destroyAllWindows()
-for file in [outfile_OF1, outfile_OF2, outfile_DD, outfile_OFnumpy]:
+for file in outfiles:
     file.close()
+
+
