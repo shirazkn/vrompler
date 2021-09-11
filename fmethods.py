@@ -168,6 +168,16 @@ class RaftModel(FMethod):
         # TODO
         return None, None
 
+    def threshold_image_from_flow(self, frame, flow, threshold):
+        frame = np.array(deepcopy(frame))
+        flow_speed = np.sqrt(np.square(flow[:, :, 0]) + np.square(flow[:, :, 1]))
+        for i in range(np.shape(frame)[0]):
+            for j in range(np.shape(frame)[1]):
+                if flow_speed[i][j] < threshold:
+                    frame[i][j] = 0.0 * frame[i][j]
+
+        return frame
+
     def interpolate_frames(self, frame_1, frame_2, flow_1, flow_2, n_iterpolations):
         interpolated_source_frames = []
         intervals = np.linspace(0, 1, n_iterpolations+2)[1:-1]

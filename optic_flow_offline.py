@@ -16,7 +16,7 @@ import numpy as np
 from output import *
 
 
-SLOW_DOWN_FACTOR = 10  # Number of frames inserted between adjacent frames
+SLOW_DOWN_FACTOR = 2  # Number of frames inserted between adjacent frames
 GENERATE_MASKS = True  # Exports a video that can serve as a mask for source footage
 OPTIC_FLOW_ITERATIONS = 10
 opticFlow = fmethods.RaftModel(iterations=OPTIC_FLOW_ITERATIONS)
@@ -35,7 +35,7 @@ else:
     vs = input.VideoFile(args["video"])
     source_file, extension = os.path.splitext(args["video"])
     filename = os.path.split(source_file)[-1]
-    filepath = os.path.join(SAVE_DIRECTORY, filename)  # TODO check if you can see height and width here
+    filepath = os.path.join(SAVE_DIRECTORY, filename)
 
 file_info = {
     "filename": filename, "filepath": filepath, "extension": extension,
@@ -74,21 +74,32 @@ outfiles = [
 last_cropped_frame = cropped_frame
 last_flow = None
 flow = None
+cv2.imwrite("test_image_write" + IMAGE_EXT, cropped_frame)
 
 outfiles[0].write(cropped_frame)
 
 # TODO for testing purposes, save <1s | After testing: while frame
-for i in tqdm(range(2)):
+for i in tqdm(range(7)):
     opticFlow.update(frame)
 
-    outfiles[3].write(last_cropped_frame)
-    if i > 0:
+    if i > 3:
+        cv2.imwrite("frame" + str(i-1) + IMAGE_EXT, last_cropped_frame)
+        outfiles[3].write(last_cropped_frame)
         interp_frames = opticFlow.interpolate_frames(last_cropped_frame, cropped_frame,
                                                      opticFlow.last_upsampled_avg_flow, opticFlow.upsampled_avg_flow,
                                                      n_iterpolations=SLOW_DOWN_FACTOR-1)
+        # TODO Test this using a test-file and 2 simple images
 
-        for _if in interp_frames:
+        for j, _if in enumerate(interp_frames):
+            cv2.imwrite("frame" + str(i) + "-" + str(j+1) + IMAGE_EXT, cropped_frame)
             outfiles[3].write(_if)
+
+        cv2.imwrite("frame" + str(i) + IMAGE_EXT, cropped_frame)
+
+        thresh_frame = opticFlow.threshold_image_from_flow(frame=cropped_frame, flow=opticFlow.upsampled_avg_flow,
+                                                           threshold=(opticFlow.flow_limits["flow_speed_min"]
+                                                                      + opticFlow.flow_limits["flow_speed_max"])*0.5)
+        cv2.imwrite("threshframe" + str(i) + IMAGE_EXT, thresh_frame)
 
     last_cropped_frame = cropped_frame
     cropped_frame = fmethods.crop_from_aspect_ratio(frame, new_asp_ratio=opticFlow.aspect_ratio)

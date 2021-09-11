@@ -2,6 +2,7 @@ import os
 
 NUMPY_EXT = ".npy.gz"
 VIDEO_EXT = ".mp4"
+IMAGE_EXT = ".jpg"
 
 RAFT_MODELS = [
     {"rel_path": "RAFT/models/raft-things.pth", "width": 1024, "aspect_ratio": 1024.0/440}
